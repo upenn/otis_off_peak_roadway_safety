@@ -1,0 +1,154 @@
+---
+title: "OTIS speed-volume data exploratory analysis"
+author: "Chi-Hyun Kim"
+date: "Last updated `r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: sandstone
+knit: (
+  function(inputFile, encoding) { 
+    rmarkdown::render(
+      input = inputFile, 
+      encoding = encoding, 
+      output_file = paste0(substr(inputFile, 1, nchar(inputFile) - 4), "_", Sys.Date(),'.html')
+                     ) 
+                                }
+      )
+---
+
+<!-- Setting style parameters for output document -->
+
+<style>
+  body {
+    font-family: "Avenir", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+    font-size: 16px !important;
+    line-height: 1.6 !important;
+    color: #3e3f3a;
+    background-color: #ffffff
+  }
+  title,
+  .title {
+    font-size: 33px !important;
+    font-weight: bold
+  }
+  h1,
+  .h1 {
+    font-size: 29px !important;
+    font-weight: bold
+  }
+  h2,
+  .h2 {
+    font-size: 25px !important;
+    font-weight: bold
+  }
+  h3,
+  .h3 {
+    font-size: 20px !important;
+    font-style: italic
+  }
+  .caption {
+  font-style: italic
+  }
+  .bold {
+  font-weight: bold
+  }
+</style>
+
+```{r Setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+```
+
+```{r Preliminaries}
+
+library(tidyverse)
+library(tidylog)
+library(janitor)
+library(scales)
+library(gt)
+library(boxr)
+
+# Set up remote data access via Box API
+box_auth()
+box_raw_data_folder <- 362958311858
+# Contents of raw data folder
+box_raw_data_list <- box_ls(362958311858) %>% as_tibble()
+
+box_processed_data_folder <- 362958210990
+
+# ggplot theming
+theme_set(theme_light())
+
+```
+
+```{r Function for table display}
+
+gt_print <- function(data) {
+  
+  data %>% 
+    gt() %>% 
+    cols_label_with(fn = ~ to_sentence_case(.)) %>% 
+    tab_style(cell_text(weight = "bold"), 
+              locations = list(cells_column_labels(), 
+                               cells_row_groups(), 
+                               cells_column_spanners())) %>% 
+    tab_style(style = cell_text(style = "italic", align = "right"), 
+              locations = list(cells_source_notes())) %>% 
+    fmt_number(where(is.numeric), decimals = 2) %>% 
+    fmt_percent(contains("percent"), decimals = 2)
+  
+}
+
+```
+
+```{r Read data}
+
+# File names and ids relating to traffic speed and volume data from OTIS
+speed_volume_files <- box_ls(359822034820) %>% as_tibble()
+
+speed_files <- speed_volume_files %>% filter(str_detect(name, "Speed"))
+volume_files <- speed_volume_files %>% filter(str_detect(name, "Volume"))
+
+# Batch process files to read in
+batch_read_files <- function(data_files_info) {
+  
+  file_ids <- data_files_info$id
+  file_names <- data_files_info$name
+  
+  custom_read_file <- function(file_id, file_name) {
+    
+    box_read_csv(file_id) %>% 
+      mutate(across(where(is.character), ~na_if(., ""))) %>% 
+      mutate(source = file_name, .before = everything())
+    
+  }
+  
+  map2(file_ids, file_names, custom_read_file, .progress = TRUE) %>% 
+    list_rbind()
+  
+}
+
+# Initial datasets with clean column names and labels for data year
+speed_data_initial <- batch_read_files(speed_files) %>% 
+  clean_names() %>% 
+  mutate(year = as.numeric(str_extract(source, "\\d{4}")), .after = source)
+
+volume_data_initial <- batch_read_files(volume_files) %>% 
+  clean_names() %>% 
+  mutate(year = as.numeric(str_extract(source, "\\d{4}")), .after = source)
+
+```
+
+
+
+
+
+
+
+
+
+
