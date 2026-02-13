@@ -71,6 +71,8 @@ library(janitor)
 library(scales)
 library(gt)
 library(boxr)
+library(sf)
+library(mapview)
 
 # Set up remote data access via Box API
 box_auth()
@@ -135,13 +137,402 @@ batch_read_files <- function(data_files_info) {
 # Initial datasets with clean column names and labels for data year
 speed_data_initial <- batch_read_files(speed_files) %>% 
   clean_names() %>% 
-  mutate(year = as.numeric(str_extract(source, "\\d{4}")), .after = source)
+  mutate(year = as.numeric(str_extract(source, "\\d{4}")), .after = source) %>% 
+  mutate(countdate = mdy(countdate))
 
 volume_data_initial <- batch_read_files(volume_files) %>% 
   clean_names() %>% 
-  mutate(year = as.numeric(str_extract(source, "\\d{4}")), .after = source)
+  mutate(year = as.numeric(str_extract(source, "\\d{4}")), .after = source) %>% 
+  mutate(countdate = mdy(countdate))
 
 ```
+
+
+```{r, include = FALSE}
+
+glimpse(speed_data_initial)
+
+# Presence of variables and variable completeness by data year
+speed_data_initial %>% group_by(year) %>% skimr::skim()
+
+# Tables of the 10 most common values for all character variables, across all years
+speed_data_initial %>% 
+  select(where(is.character)) %>% 
+  map(~ (tabyl(.) %>% 
+           arrange(desc(n)) %>% 
+           head(10)))
+
+# Some fields are entirely missing or only present in one year's file, but 
+# they do not impact interpretation of the data.
+# The set of road segments sampled each year are not identical.
+
+# Some years have far more data than other years.
+
+ #                                  .     n   percent
+ # Philadelphia_County_Speed_2022.csv 25776 0.4645329
+ # Philadelphia_County_Speed_2023.csv 14712 0.2651384
+ # Philadelphia_County_Speed_2025.csv  8592 0.1548443
+ # Philadelphia_County_Speed_2024.csv  6408 0.1154844
+
+```
+
+```{r, include = FALSE}
+
+glimpse(volume_data_initial)
+
+# Presence of variables and variable completeness by data year
+volume_data_initial %>% group_by(year) %>% skimr::skim()
+
+# Tables of the 10 most common values for all character variables, across all years
+volume_data_initial %>% 
+  select(where(is.character)) %>% 
+  map(~ (tabyl(.) %>% 
+           arrange(desc(n)) %>% 
+           head(10)))
+
+# Some fields are entirely missing or only present in one year's file, but 
+# they do not impact interpretation of the data.
+# The set of road segments sampled each year are not identical.
+
+# Some years have far more data than other years. (Distribution very similar to speed data.)
+
+ #                            .     n   percent
+ # Philadelphia_2022_Volume.csv 25248 0.4618086
+ # Philadelphia_2023_Volume.csv 14736 0.2695347
+ # Philadelphia_2025_Volume.csv  8256 0.1510097
+ # Philadelphia_2024_Volume.csv  6432 0.1176471
+
+```
+
+```{r Export data, include=FALSE}
+
+# speed_data_export <- speed_data_initial %>% 
+#   remove_empty()
+# 
+# box_save_rds(speed_data_export, file_name = "speed_data_v1.rds", dir_id = 362958210990)
+# 
+# volume_data_export <- volume_data_initial %>% 
+#   remove_empty()
+# 
+# box_save_rds(volume_data_export, file_name = "volume_data_v1.rds", dir_id = 362958210990)
+
+```
+
+```{r, include=FALSE}
+
+# What are unique identifiers for each measurement point?
+speed_ids <- speed_data_initial %>% 
+  distinct(year, recordnum, aadv, fromlmt, tolmt, latitude, longitude)
+
+speed_ids_test1 <- speed_ids %>% 
+  # distinct: no rows removed
+  distinct(recordnum)
+
+speed_ids_test2 <- speed_ids %>% 
+  # distinct: removed 24 rows (4%), 553 rows remaining
+  distinct(aadv)
+
+speed_ids_test3 <- speed_ids %>% 
+  # distinct: removed 93 rows (16%), 484 rows remaining
+  distinct(year, fromlmt, tolmt)
+
+speed_ids_test4 <- speed_ids %>% 
+  # distinct: removed 47 rows (8%), 530 rows remaining
+  distinct(year, latitude, longitude)
+
+speed_ids_test5 <- speed_ids %>% 
+  get_dupes(year, latitude, longitude)
+
+# Look at one group where 3 'recordnum's exist for the same year/long/lat triple
+# The records under the same 'aadv' value are exact duplicates except for 'recordnum'
+speed_ids_test6 <- speed_data_initial %>% 
+  filter(recordnum %in% c("162377", "162537", "162538"))
+
+# Look at the data empirically and see what uniquely identifies each data row (at count hour 0)
+# 'aadv' seems to be the most specific variable to pick out a pattern of data at a particular
+# 'tolmt' 'fromlmt' pair (just one duplicate). All others have more duplicates.
+speed_ids_test7 <- speed_data_initial %>% 
+  filter(count_hr == 0) %>% 
+  group_by(year, fromlmt, tolmt, pick(contains("speed_"))) %>% 
+  summarize(recordnum_unique = n_distinct(recordnum),
+            aadv_unique = n_distinct(aadv),
+            longitude_unique = n_distinct(longitude),
+            latitude_unique = n_distinct(latitude)) %>% 
+  ungroup() %>% 
+  select(-contains("speed_"))
+
+# Is long/lat pair a unique id for measurement location?
+# One coordinate where there are two 'fromlmt' values, otherwise good.
+speed_ids_test8 <- speed_data_initial %>% 
+  filter(count_hr == 0) %>% 
+  group_by(year, longitude, latitude) %>% 
+  summarize(recordnum_unique = n_distinct(recordnum),
+            aadv_unique = n_distinct(aadv),
+            fromlmt_unique = n_distinct(fromlmt),
+            tolmt_unique = n_distinct(tolmt)) %>% 
+  ungroup() %>% 
+  select(-contains("speed_"))
+
+# Is from/tolmt a unique id for measurement location?
+# Bunch of pairs where there is more than one coordinate associated.
+speed_ids_test9 <- speed_data_initial %>% 
+  filter(count_hr == 0) %>% 
+  group_by(year, fromlmt, tolmt) %>% 
+  summarize(recordnum_unique = n_distinct(recordnum),
+            aadv_unique = n_distinct(aadv),
+            longitude_unique = n_distinct(longitude),
+            latitude_unique = n_distinct(latitude)) %>% 
+  ungroup() %>% 
+  select(-contains("speed_"))
+
+# Summary: 
+# 'recordnum' seems to be the most obvious choice; there are some duplicates of same data under
+# different 'recordnum' values, but not too many. 'aadv' is more specific but records annual average
+# traffic volume and doesn't seem intended to be used as an ID.
+# But note that the same coordinates can have different recorded data across the same dates, 
+# perhaps because there were two measurement tubes across the same section of the roadway.
+# Further, the same fromlmt/tolmt pair can include multiple coordinates, so 'recordnum' should be
+# used as the unique identifier for measurement points.
+
+```
+
+```{r}
+
+# Are there join keys between speed/volume in the data?
+# 'recordnum' seems to be the cleanest join key
+
+join_test1 <- speed_data_initial %>% 
+  distinct(year, recordnum) %>% 
+  full_join(volume_data_initial %>% distinct(year, recordnum), by = c("year", "recordnum"))
+
+# full_join: added no columns
+#            > rows only in x                           21
+#            > rows only in volume_data_initial %>%..    1
+#            > matched rows                            556
+#            >                                        =====
+#            > rows total                              578
+
+# 'recordnum' is unique across years as well, so the year doesn't need to be specified.
+join_test2 <- speed_data_initial %>% 
+  distinct(recordnum) %>% 
+  full_join(volume_data_initial %>% distinct(recordnum), by = "recordnum")
+
+# full_join: added no columns
+#            > rows only in x                           21
+#            > rows only in volume_data_initial %>%..    1
+#            > matched rows                            556
+#            >                                        =====
+#            > rows total                              578
+
+# 'aadv' doesn't work as a join key.
+join_test3 <- speed_data_initial %>% 
+  distinct(year, aadv) %>% 
+  full_join(volume_data_initial %>% distinct(year, aadv), by = "aadv")
+
+# full_join: added 2 columns (year.x, year.y)
+#            > rows only in x                           20
+#            > rows only in volume_data_initial %>%..    1
+#            > matched rows                            569    (includes duplicates)
+#            >                                        =====
+#            > rows total                              590
+
+# Comparing the total volume data from both the speed and volume datasets
+joined <- speed_data_initial %>% 
+  full_join(volume_data_initial %>% 
+              select(year, recordnum, countdate, count_hr, fromlmt, tolmt, longitude, latitude, volcount), 
+            by = c("year", "recordnum", "countdate", "count_hr", "fromlmt", "tolmt", "longitude", "latitude")) %>% 
+  mutate(volume_agreement = volcount == total) %>% 
+  mutate(volume_diff = volcount - total) %>% 
+  mutate(volume_diff_category = case_when(volume_diff == 0 ~ "No diff",
+                                          volume_diff > 0 ~ "Volume larger",
+                                          volume_diff < 0 ~ "Speed total larger",
+                                          .default = "One source missing"))
+
+# full_join: added one column (volcount)
+#            > rows only in x                             936
+#            > rows only in volume_data_initial %>%..     120
+#            > matched rows                            54,552
+#            >                                        ========
+#            > rows total                              55,608
+
+# About 15% of rows have disagreements for total volume between volume and speed
+joined %>% tabyl(volume_agreement)
+
+ # volume_agreement     n    percent valid_percent
+ #            FALSE  8089 0.14546468     0.1482805
+ #             TRUE 46463 0.83554525     0.8517195
+ #               NA  1056 0.01899007            NA
+
+# Usually when there are differences the value in the speed dataset is larger, which is strange
+joined %>% tabyl(volume_diff_category)
+
+ # volume_diff_category     n    percent
+ #              No diff 46463 0.83554525
+ #   One source missing  1056 0.01899007
+ #   Speed total larger  7250 0.13037692
+ #        Volume larger   839 0.01508776
+
+# Upshot: We'll use the volume from the volume data directly since that is what that dataset is for, 
+# not the total column in the speed data
+
+```
+
+# Spatial coverage
+
+```{r}
+
+speed_data_geospatial <- speed_data_initial %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = "EPSG:4326")
+
+volume_data_geospatial <- volume_data_initial %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = "EPSG:4326")
+
+```
+
+Mapping out points where speed (brown points) and volume (green points) were measured year by year, we see that the measurement locations are quite different between years but very similar (though not identical) between speed/volume measurements in a given year.
+
+## Speed
+
+```{r}
+
+mapview(speed_data_geospatial %>% filter(year == 2022), col.regions = "brown")
+
+mapview(speed_data_geospatial %>% filter(year == 2023), col.regions = "brown")
+
+mapview(speed_data_geospatial %>% filter(year == 2024), col.regions = "brown")
+
+mapview(speed_data_geospatial %>% filter(year == 2025), col.regions = "brown")
+
+```
+
+## Volume
+
+```{r}
+
+mapview(volume_data_geospatial %>% filter(year == 2022), col.regions = "darkgreen")
+
+mapview(volume_data_geospatial %>% filter(year == 2023), col.regions = "darkgreen")
+
+mapview(volume_data_geospatial %>% filter(year == 2024), col.regions = "darkgreen")
+
+mapview(volume_data_geospatial %>% filter(year == 2025), col.regions = "darkgreen")
+
+```
+
+# Temporal coverage
+
+Upshot: Measurement dates vary systematically from year to year. This includes the months covered, the share of weekdays/weekends covered, as well as the share of weekends by month.
+
+The temporal distribution of speed data is quite similar to volume data but not exactly the same.
+
+Coverage of data through the hours of the day is even (i.e., for each measurement instance there is one row for each hour).
+
+## Speed
+
+```{r}
+
+# Daily patterns
+speed_data_temporal_coverage_daily <- speed_data_initial %>% 
+  group_by(year, countdate) %>% 
+  summarize(instances = n_distinct(aadv)) %>% 
+  ungroup() %>% 
+  mutate(weekday = wday(countdate, label = TRUE)) %>% 
+  mutate(weekend = if_else(weekday %in% c("Sat", "Sun"), "Weekend", "Weekday")) %>% 
+  mutate(month = month(countdate, label = TRUE))
+
+speed_data_temporal_coverage_daily %>% 
+  ggplot(aes(x = countdate, y = instances)) +
+  geom_col() +
+  labs(title = "Measurement instances by date",
+       subtitle = "For speed data")
+
+speed_data_temporal_coverage_daily %>% 
+  group_by(year, month, weekend) %>% 
+  summarize(instances = sum(instances)) %>% 
+  ggplot(aes(x = month, y = instances, fill = weekend)) +
+  geom_col(position = position_stack()) +
+  facet_wrap(~year) +
+  labs(title = "Measurement instances by month",
+       subtitle = "For speed data")
+
+speed_data_temporal_coverage_daily %>% 
+  group_by(year, weekend) %>% 
+  summarize(instances = sum(instances)) %>% 
+  ggplot(aes(x = year, y = instances, fill = weekend)) +
+  geom_col(position = position_stack()) +
+  labs(title = "Measurement instances by weekday/weekend status",
+       subtitle = "For speed data")
+
+# Hourly patterns
+speed_data_initial %>% 
+  group_by(year, count_hr) %>% 
+  summarize(instances = n_distinct(aadv)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = count_hr, y = instances)) +
+  geom_col() +
+  facet_wrap(~year)
+
+```
+
+## Volume
+
+```{r}
+
+# Daily patterns
+volume_data_temporal_coverage_daily <- volume_data_initial %>% 
+  group_by(year, countdate) %>% 
+  summarize(instances = n_distinct(aadv)) %>% 
+  ungroup() %>% 
+  mutate(weekday = wday(countdate, label = TRUE)) %>% 
+  mutate(weekend = if_else(weekday %in% c("Sat", "Sun"), "Weekend", "Weekday")) %>% 
+  mutate(month = month(countdate, label = TRUE))
+
+volume_data_temporal_coverage_daily %>% 
+  ggplot(aes(x = countdate, y = instances)) +
+  geom_col() +
+  labs(title = "Measurement instances by date",
+       subtitle = "For volume data")
+
+volume_data_temporal_coverage_daily %>% 
+  group_by(year, month, weekend) %>% 
+  summarize(instances = sum(instances)) %>% 
+  ggplot(aes(x = month, y = instances, fill = weekend)) +
+  geom_col(position = position_stack()) +
+  facet_wrap(~year) +
+  labs(title = "Measurement instances by month",
+       subtitle = "For volume data")
+
+volume_data_temporal_coverage_daily %>% 
+  group_by(year, weekend) %>% 
+  summarize(instances = sum(instances)) %>% 
+  ggplot(aes(x = year, y = instances, fill = weekend)) +
+  geom_col(position = position_stack()) +
+  labs(title = "Measurement instances by weekday/weekend status",
+       subtitle = "For volume data")
+
+# Hourly patterns
+volume_data_initial %>% 
+  group_by(year, count_hr) %>% 
+  summarize(instances = n_distinct(aadv)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = count_hr, y = instances)) +
+  geom_col() +
+  facet_wrap(~year)
+
+```
+
+# Speeding descriptives
+
+```{r}
+
+# speed_data_categorized <- speed_data_initial %>% 
+  
+
+
+
+
+```
+
 
 
 
