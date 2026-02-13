@@ -1,0 +1,391 @@
+---
+title: "OTIS speed-volume data exploratory analysis"
+author: "Demi Yang"
+date: "Last updated `r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: sandstone
+knit: (
+  function(inputFile, encoding) { 
+    rmarkdown::render(
+      input = inputFile, 
+      encoding = encoding, 
+      output_file = paste0(substr(inputFile, 1, nchar(inputFile) - 4), "_", Sys.Date(),'.html')
+                     ) 
+                                }
+      )
+---
+
+<!-- Setting style parameters for output document -->
+
+<style>
+  body {
+    font-family: "Avenir", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+    font-size: 16px !important;
+    line-height: 1.6 !important;
+    color: #3e3f3a;
+    background-color: #ffffff
+  }
+  title,
+  .title {
+    font-size: 33px !important;
+    font-weight: bold
+  }
+  h1,
+  .h1 {
+    font-size: 29px !important;
+    font-weight: bold
+  }
+  h2,
+  .h2 {
+    font-size: 25px !important;
+    font-weight: bold
+  }
+  h3,
+  .h3 {
+    font-size: 20px !important;
+    font-style: italic
+  }
+  .caption {
+  font-style: italic
+  }
+  .bold {
+  font-weight: bold
+  }
+</style>
+
+```{r Setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+options(scipen = 999)  # 取消科学计数法
+sf_use_s2(FALSE)
+
+
+```
+
+```{r Preliminaries}
+
+library(tidyverse)
+library(tidylog)
+library(janitor)
+library(scales)
+library(gt)
+library(boxr)
+library(sf)
+library(tidyverse)
+library(tidylog)
+library(janitor)
+library(gt)
+
+theme_set(theme_light())
+
+rms <- st_read("RMS_-_ADMIN_-_All//GISDATA_RMSADMIN.shp", quiet = TRUE) %>%
+  clean_names()
+
+center <- st_read("Street_Centerline.geojson", quiet = TRUE) %>%
+  clean_names()
+
+bike <- st_read("Bike_Network.geojson", quiet = TRUE) %>%
+  clean_names()
+
+complete <- st_read("CompleteStreets.geojson", quiet = TRUE) %>%
+  clean_names()
+
+```
+
+```{r Function for table display}
+
+gt_print <- function(data) {
+  data %>%
+    gt() %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = list(
+        cells_column_labels(),
+        cells_row_groups(),
+        cells_column_spanners()
+      )
+    ) %>%
+    fmt_number(where(is.numeric), decimals = 3)
+}
+
+```
+
+```{r Read data}
+# 2) Glimpse fields
+# =========================
+cat("\n--- RMSADMIN ---\n")
+glimpse(rms)
+
+cat("\n--- Street Centerline ---\n")
+glimpse(center)
+
+cat("\n--- Bike Network ---\n")
+glimpse(bike)
+
+cat("\n--- Complete Streets ---\n")
+glimpse(complete)
+
+# 也顺手看一下 CRS / geometry type
+cat("\nCRS:\n")
+print(list(
+  rms = st_crs(rms),
+  center = st_crs(center),
+  bike = st_crs(bike),
+  complete = st_crs(complete)
+))
+
+cat("\nGeometry types:\n")
+print(list(
+  rms = table(st_geometry_type(rms)),
+  center = table(st_geometry_type(center)),
+  bike = table(st_geometry_type(bike)),
+  complete = table(st_geometry_type(complete))
+))
+```
+
+
+```{r Plot data}
+# =========================
+# 4) plot raw layers
+# =========================
+ggplot(rms) + geom_sf(linewidth = 0.15) + ggtitle("RMSADMIN (raw)")
+ggplot(center) + geom_sf(linewidth = 0.15) + ggtitle("Street Centerline (raw)")
+ggplot(bike) + geom_sf(linewidth = 0.25) + ggtitle("Bike Network (raw)")
+ggplot(complete) + geom_sf(linewidth = 0.15) + ggtitle("CompleteStreets (raw)")
+
+
+```
+
+
+1) 第一步：用 RMSADMIN覆盖范围筛选Centerline，得到底层路网
+Step 1: Filter the Centerline with the coverage of RMSADMIN to obtain the underlying road network
+
+将 rmsadmin 线数据做一个小缓冲（20m），得到RMS覆盖走廊；保留所有与该走廊相交的 centerline线段作为底层路网。
+Create a small buffer (20m) for the rmsadmin line data to obtain the RMS coverage corridor. Retain all centerline segments that intersect with this corridor as the underlying road network
+```{r}
+
+# 1) Reproject to local CRS (US survey feet)
+#    EPSG:2272 = NAD83 / Pennsylvania South (ftUS)
+target_crs <- 2272
+
+rms_t <- st_transform(st_make_valid(rms), target_crs)
+center_t <- st_transform(st_make_valid(center), target_crs)
+bike_t <- st_transform(st_make_valid(bike), target_crs)
+complete_t <- st_transform(st_make_valid(complete), target_crs)
+
+# 2) Keep only needed fields
+center_keep <- center_t %>%
+  select(
+    seg_id, class, st_type, oneway, stname,
+    shape_length = shape_length,
+    length,
+    zip_left, zip_right,
+    l_f_add, l_t_add, r_f_add, r_t_add,
+    st_code,
+    geometry,
+  )
+
+bike_keep <- bike_t %>%
+  select(
+    seg_id,
+    class, type, oneway,
+    geometry
+  )
+
+rms_keep <- rms_t %>%
+  select(
+    speed_limi, fhwa_func, func_cls, juris, maint_func, fed_aid_sy,
+    st_rt_no, seg_bgn, offset_bgn, seg_end, offset_end, seg_pt_bgn, seg_pt_end,
+    geometry
+  )
+
+complete_keep <- complete_t %>%
+  select(
+    seg_id, combined_s, oneway,
+    class, class1, speedlim, street_typ, surfawidth, parking, sidewlk_wd, wlk_zn,
+    geometry
+  )
+
+
+```
+
+```{r}
+# 3) STEP 1: Build base network
+#    Rule: buffer RMS coverage corridor, keep centerline segments intersecting it.
+buffer_ft <- 65  # ~20 meters; you can tune (30–100ft)
+rms_corridor <- rms_keep %>%
+  st_union() %>%
+  st_buffer(dist = buffer_ft)
+
+base_network <- center_keep %>%
+  filter(st_intersects(geometry, rms_corridor, sparse = FALSE)[,1])
+
+cat("\nBase network segments:", nrow(base_network), "of", nrow(center_keep), "\n")
+
+
+
+```
+
+```{r}
+# 4) STEP 2A: Join CompleteStreets by SEG_ID (attribute join)
+#    - Need to collapse duplicates by seg_id first.
+
+# Helper for safe "first non-NA"
+first_non_na <- function(x) {
+  x2 <- x[!is.na(x) & x != ""]
+  if (length(x2) == 0) NA else x2[1]
+}
+
+to_num <- function(x) {
+  x <- as.character(x)
+  x <- stringr::str_trim(x)
+  x[x %in% c("", "NA", "N/A", "NULL")] <- NA
+  suppressWarnings(as.numeric(x))
+}
+
+# 注意：complete_keep 是前面 select 后的 sf
+complete_clean <- complete_keep %>%
+  st_drop_geometry() %>%
+  mutate(
+    seg_id = as.character(seg_id),
+    speedlim   = to_num(speedlim),
+    surfawidth = to_num(surfawidth),
+    sidewlk_wd = to_num(sidewlk_wd)
+  )
+
+
+complete_1to1 <- complete_clean %>%
+  group_by(seg_id) %>%
+  summarise(
+    combined_s  = first_non_na(combined_s),
+    oneway_cs   = first_non_na(oneway),
+    class_cs    = first_non_na(class),
+    class1_cs   = first_non_na(class1),
+
+    speedlim    = suppressWarnings(max(speedlim, na.rm = TRUE)),
+    street_typ  = first_non_na(street_typ),
+    surfawidth  = suppressWarnings(median(surfawidth, na.rm = TRUE)),
+    parking     = first_non_na(parking),
+    sidewlk_wd  = suppressWarnings(median(sidewlk_wd, na.rm = TRUE)),
+    wlk_zn      = first_non_na(wlk_zn),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    speedlim = if_else(is.infinite(speedlim), NA_real_, speedlim)
+  )
+
+
+# join
+base_plus_complete <- base_network %>%
+  mutate(seg_id = as.character(seg_id)) %>%
+  left_join(complete_1to1, by = "seg_id")
+```
+
+```{r}
+# 5) STEP 2B: Join BikeNetwork
+#    - Try ID join first (bike has seg_id)
+#    - If match rate is low, fallback to spatial nearest matching.
+
+bike_by_id <- bike_keep %>%
+  st_drop_geometry() %>%
+  transmute(
+    seg_id = as.character(seg_id),
+    class, type, oneway
+  ) %>%
+  group_by(seg_id) %>%
+  summarise(
+    bike_any = TRUE,
+    bike_class  = paste(sort(unique(na.omit(class))), collapse="|"),
+    bike_type   = paste(sort(unique(na.omit(type))),  collapse="|"),
+    bike_oneway = paste(sort(unique(na.omit(oneway))), collapse="|"),
+    .groups = "drop"
+  )
+
+base_plus_bike <- base_plus_complete %>%
+  mutate(seg_id = as.character(seg_id)) %>%
+  left_join(bike_by_id, by = "seg_id")
+
+
+```
+
+```{r}
+# ----------------------------
+# STEP 2C: Join RMSADMIN -> base network 
+
+# 目标：一条 RMS 覆盖的多条 centerline（seg_id）赋相同 RMS 属性
+# Multiple centerlines (seg_id) covered by one RMS are assigned the same RMS attribute
+# 方法：RMS 小缓冲 -> 与 base 相交 -> 对每个 seg_id 选相交长度最大的 RMS
+# RMS small buffer -> Intersect with base -> Select the RMS with the maximum intersection length for each seg_id
+
+
+rms_buffer_ft <- 60  # 30–100ft 都可试；越大越“宽松”
+rms_buf <- st_buffer(rms_keep, dist = rms_buffer_ft) %>%
+  mutate(rms_row = row_number())
+
+# 多对多相交
+inter <- st_intersection(
+  base_plus_bike %>% select(seg_id),
+  rms_buf %>% select(rms_row)
+)
+
+# 每个 seg_id 选相交长度最长的 rms_row
+inter_key <- inter %>%
+  mutate(int_len_ft = as.numeric(st_length(geometry))) %>%
+  st_drop_geometry() %>%
+  group_by(seg_id) %>%
+  slice_max(int_len_ft, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+rms_attr <- rms_keep %>%
+  st_drop_geometry() %>%
+  mutate(rms_row = row_number()) %>%
+  select(
+    rms_row,
+    speed_limi, fhwa_func, func_cls, juris, maint_func, fed_aid_sy,
+    st_rt_no, seg_bgn, offset_bgn, seg_end, offset_end, seg_pt_bgn, seg_pt_end
+  )
+
+base_network_enriched <- base_plus_bike %>%
+  left_join(inter_key, by = "seg_id") %>%
+  left_join(rms_attr, by = "rms_row") %>%
+  mutate(rms_n = if_else(is.na(rms_row), NA_real_, 1)) %>%  # 简单标记是否匹配到 RMS
+  select(-rms_row)
+
+# quick check
+cat("RMS-covered share:", round(mean(!is.na(base_network_enriched$fhwa_func)), 3), "\n")
+
+
+```
+
+```{r}
+# 7) Output: final layer ready for modeling / app
+
+# base_network_enriched is your final bottom network with joined attributes
+base_network_enriched
+```
+
+
+Data Cleaning
+先做一个缺失概览（决定哪些字段要填、哪些字段要删）
+```{r}
+library(sf)
+library(dplyr)
+library(tidyr)
+
+na_rate <- base_network_enriched %>%
+  st_drop_geometry() %>%
+  summarise(across(everything(), ~ mean(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "field", values_to = "na_rate") %>%
+  arrange(desc(na_rate))
+
+gt_print(head(na_rate, 30))
+
+```
+
+
+
+
