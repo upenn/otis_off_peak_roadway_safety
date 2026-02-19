@@ -356,7 +356,7 @@ joined <- speed_data_initial %>%
 #            > rows total                              55,608
 
 # About 15% of rows have disagreements for total volume between volume and speed
-joined %>% tabyl(volume_agreement)
+# joined %>% tabyl(volume_agreement)
 
  # volume_agreement     n    percent valid_percent
  #            FALSE  8089 0.14546468     0.1482805
@@ -364,7 +364,7 @@ joined %>% tabyl(volume_agreement)
  #               NA  1056 0.01899007            NA
 
 # Usually when there are differences the value in the speed dataset is larger, which is strange
-joined %>% tabyl(volume_diff_category)
+# joined %>% tabyl(volume_diff_category)
 
  # volume_diff_category     n    percent
  #              No diff 46463 0.83554525
@@ -391,33 +391,33 @@ volume_data_geospatial <- volume_data_initial %>%
 
 Mapping out points where speed (brown points) and volume (green points) were measured year by year, we see that the measurement locations are quite different between years but very similar (though not identical) between speed/volume measurements in a given year.
 
-## Speed
+<!-- ## Speed -->
 
-```{r}
+<!-- ```{r} -->
 
-mapview(speed_data_geospatial %>% filter(year == 2022), col.regions = "brown")
+<!-- mapview(speed_data_geospatial %>% filter(year == 2022), col.regions = "brown") -->
 
-mapview(speed_data_geospatial %>% filter(year == 2023), col.regions = "brown")
+<!-- mapview(speed_data_geospatial %>% filter(year == 2023), col.regions = "brown") -->
 
-mapview(speed_data_geospatial %>% filter(year == 2024), col.regions = "brown")
+<!-- mapview(speed_data_geospatial %>% filter(year == 2024), col.regions = "brown") -->
 
-mapview(speed_data_geospatial %>% filter(year == 2025), col.regions = "brown")
+<!-- mapview(speed_data_geospatial %>% filter(year == 2025), col.regions = "brown") -->
 
-```
+<!-- ``` -->
 
-## Volume
+<!-- ## Volume -->
 
-```{r}
+<!-- ```{r} -->
 
-mapview(volume_data_geospatial %>% filter(year == 2022), col.regions = "darkgreen")
+<!-- mapview(volume_data_geospatial %>% filter(year == 2022), col.regions = "darkgreen") -->
 
-mapview(volume_data_geospatial %>% filter(year == 2023), col.regions = "darkgreen")
+<!-- mapview(volume_data_geospatial %>% filter(year == 2023), col.regions = "darkgreen") -->
 
-mapview(volume_data_geospatial %>% filter(year == 2024), col.regions = "darkgreen")
+<!-- mapview(volume_data_geospatial %>% filter(year == 2024), col.regions = "darkgreen") -->
 
-mapview(volume_data_geospatial %>% filter(year == 2025), col.regions = "darkgreen")
+<!-- mapview(volume_data_geospatial %>% filter(year == 2025), col.regions = "darkgreen") -->
 
-```
+<!-- ``` -->
 
 # Temporal coverage
 
@@ -794,7 +794,7 @@ off_peak_any_speeding_top %>%
 
 Major arterials and high speed ramps are disproportionately prone to speeding drivers in off-peak hours.
 
-The map below shows the location of these majority-speeding roadways; thickness is proportional to % of speeding traffic.
+The map below shows the location of these majority-speeding roadways.
 
 ```{r}
 
@@ -803,7 +803,7 @@ off_peak_any_speeding_top_map <- off_peak_any_speeding_top %>%
               select(recordnum)) %>%
   st_as_sf(crs = "EPSG:2272")
 
-mapview(off_peak_any_speeding_high_map, zcol = "roadway_type", lwd = "percent")
+mapview(off_peak_any_speeding_top_map, zcol = "roadway_type")
 
 ```
 
@@ -836,7 +836,7 @@ off_peak_high_speeding_top %>%
 
 Major arterials and high speed ramps are even more disproportionately prone to high-speeding drivers in off-peak hours.
 
-The map below shows the location of these high-speeding roadways; thickness is proportional to % of speeding traffic.
+The map below shows the location of these high-speeding roadways.
 
 ```{r}
 
@@ -845,7 +845,7 @@ off_peak_high_speeding_top_map <- off_peak_high_speeding_top %>%
               select(recordnum)) %>%
   st_as_sf(crs = "EPSG:2272")
 
-mapview(off_peak_high_speeding_top_map, zcol = "roadway_type", lwd = "percent")
+mapview(off_peak_high_speeding_top_map, zcol = "roadway_type")
 
 ```
 
