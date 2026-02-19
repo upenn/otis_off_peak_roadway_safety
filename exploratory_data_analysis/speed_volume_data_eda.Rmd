@@ -93,7 +93,7 @@ gt_print <- function(data) {
   
   data %>% 
     gt() %>% 
-    cols_label_with(fn = ~ to_sentence_case(.)) %>% 
+    cols_label_with(fn = ~ snakecase::to_sentence_case(.)) %>% 
     tab_style(cell_text(weight = "bold"), 
               locations = list(cells_column_labels(), 
                                cells_row_groups(), 
@@ -525,21 +525,378 @@ volume_data_initial %>%
 
 ```{r}
 
-# speed_data_categorized <- speed_data_initial %>% 
-  
-
-
-
+# Speed data in long format to facilitate analyses
+speed_data_long <- speed_data_initial %>% 
+  # Join volume data
+  left_join(volume_data_initial %>% 
+              select(recordnum, countdate, count_hr, volcount)) %>% 
+  # Use totals from speed data only if there's no corresponding volume data
+  mutate(volume_total = coalesce(volcount, total)) %>% 
+  select(year, recordnum, speedlimit, road, fromlmt, tolmt, countdate, count_hr, volume_total, contains("speed_")) %>% 
+  pivot_longer(contains("speed_"), 
+               values_to = "count", 
+               names_to = c("range_low", "range_high"), 
+               names_pattern = "speed_(\\d+)_(\\d+)") %>% 
+  # Reduce speed categories
+  mutate(speed_category_binary =
+           if_else(range_high > speedlimit, "Speeding", "Not speeding")) %>% 
+  mutate(speed_category_detailed =
+           case_when(range_high <= speedlimit ~ "Not speeding",
+                     range_low > speedlimit + 20 ~ "More than 20mph over speed limit",
+                     range_low > speedlimit + 15 ~ "16-20mph over speed limit",
+                     range_low > speedlimit + 10 ~ "11-15mph over speed limit",
+                     range_low > speedlimit + 0 ~ "1-10mph over speed limit",
+                     .default = "CHECK")) %>% 
+  mutate(speed_category_detailed =
+           fct_relevel(speed_category_detailed,
+                      "Not speeding",
+                      "1-10mph over speed limit",
+                      "11-15mph over speed limit",
+                      "16-20mph over speed limit",
+                      "More than 20mph over speed limit"))
 
 ```
 
+```{r Join to centerlines}
 
+centerlines <- box_read_rds(2139915462983)
 
+centerlines_ready <- centerlines %>% 
+  mutate(roadway_type = 
+           case_when(class == 0 ~ "Navy Yard",
+                     class == 1 ~ "Expressways",
+                     class == 2 ~ "Major Arterial",
+                     class == 3 ~ "Minor Arterial",
+                     class == 4 ~ "Collector",
+                     class == 5 ~ "Local",
+                     class == 6 ~ "Driveway",
+                     class == 9 ~ "Low Speed Ramps",
+                     class == 10 ~ "High Speed Ramps",
+                     class == 12 ~ "Non Travable",
+                     class == 14 ~ "City Boundary",
+                     class == 15 ~ "Walking Connector",
+                     class == 18 ~ "Traffic Controlled Crosswalks")) %>% 
+  # There are a few industrial/parking types of segments under class == 13 
+  # which is not labeled in the data dictionary and is excluded here.
+  # filter: removed 73 rows (<1%), 41,186 rows remaining
+  filter(!is.na(roadway_type)) %>% 
+  select(seg_id, roadway_type) %>% 
+  # Index column
+  mutate(centerlines_index = row_number()) %>% 
+  # Projected CRS
+  st_transform("EPSG:2272")
+  
+speed_data_coords <- speed_data_initial %>% 
+  distinct(recordnum, longitude, latitude) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = "EPSG:4326") %>% 
+  # Projected CRS
+  st_transform("EPSG:2272")
 
+# Find the index of the nearest line for each point
+nearest_line_indices <- st_nearest_feature(speed_data_coords, centerlines_ready)
 
+# Join by index
+# Geometry: measurement points
+speed_data_centerlines <- speed_data_coords %>% 
+  mutate(centerlines_index = centerlines_ready$centerlines_index[nearest_line_indices]) %>% 
+  left_join(centerlines_ready %>% st_drop_geometry()) %>% 
+  mutate(roadway_type =
+           fct_relevel(roadway_type,
+                       "Major Arterial",
+                       "Minor Arterial",
+                       "Collector",
+                       "Local",
+                       "High Speed Ramps",
+                       "Low Speed Ramps",
+                       "Expressways"))
 
+# Geometry: segments where measurements were made
+speed_data_centerlines_segments <- speed_data_centerlines %>%
+  st_drop_geometry() %>%
+  left_join(centerlines_ready %>% 
+              select(seg_id)) %>%
+  st_as_sf(crs = "EPSG:2272")
 
+```
 
+```{r Speed data ready for analysis}
 
+speed_data_analysis <- speed_data_long %>% 
+  left_join(speed_data_centerlines %>% 
+              st_drop_geometry() %>% 
+              select(recordnum, seg_id, roadway_type)) %>% 
+  mutate(time_of_day = 
+           case_when(count_hr >= 20 ~ "Off-peak",
+                     count_hr >= 16 ~ "Peak",
+                     count_hr >= 11 ~ "Off-peak",
+                     count_hr >= 7 ~ "Peak",
+                     count_hr >= 0 ~ "Off-peak"))
+
+```
+
+## Characteristics of measurement locations
+
+Joining the 2022-2025 speed measurement data spatially to Philadelphia street centerlines, we get this coverage:
+
+```{r}
+
+mapview(speed_data_centerlines, cex = 3) +
+  mapview(speed_data_centerlines_segments, zcol = "roadway_type")
+
+```
+
+The distribution of speed measurement points by roadway type is thus:
+
+```{r}
+
+speed_data_analysis %>% 
+  distinct(recordnum, roadway_type) %>% 
+  tabyl(roadway_type) %>% 
+  gt_print()
+
+```
+
+## Speeding by time of day
+
+### Overall
+
+#### Binary
+
+```{r}
+
+speed_data_analysis %>% 
+  group_by(recordnum, countdate, count_hr, time_of_day, speed_category_binary) %>% 
+  summarize(count = sum(count)) %>% 
+  group_by(count_hr, time_of_day, speed_category_binary) %>% 
+  summarize(count = sum(count)) %>% 
+  mutate(percent = count / sum(count)) %>% 
+  ungroup() %>% 
+  filter(speed_category_binary != "Not speeding") %>%
+  ggplot(aes(x = count_hr, y = percent, fill = time_of_day)) +
+  geom_col() +
+  scale_y_continuous(labels = label_percent()) +
+  scale_fill_manual(values = c("darkred", "darkblue")) +
+  labs(title = "Speeding traffic by time of day",
+       x = "Hour",
+       y = "Percent speeding",
+       fill = "Time of day",
+       caption = "Source: DVRPC speed measurement data") +
+  theme(legend.position = "bottom")
+
+```
+
+#### Detailed
+
+```{r}
+
+speed_data_analysis %>% 
+  group_by(recordnum, countdate, count_hr, speed_category_detailed) %>% 
+  summarize(count = sum(count)) %>% 
+  group_by(count_hr, speed_category_detailed) %>% 
+  summarize(count = sum(count)) %>% 
+  mutate(percent = count / sum(count)) %>% 
+  ungroup() %>% 
+  filter(speed_category_detailed != "Not speeding") %>%
+  ggplot(aes(x = count_hr, y = percent, fill = speed_category_detailed)) +
+  geom_col(position = position_stack()) +
+  scale_y_continuous(labels = label_percent()) +
+  # scale_fill_manual(values = c("darkred", "darkblue")) +
+  labs(title = "Speeding traffic by time of day",
+       x = "Hour",
+       y = "Percent speeding",
+       fill = "Speeding category",
+       caption = "Source: DVRPC speed measurement data") +
+  theme(legend.position = "right")
+
+```
+
+### By roadway type
+
+#### Binary
+
+```{r}
+
+speed_data_analysis %>% 
+  group_by(recordnum, countdate, count_hr, time_of_day, roadway_type, speed_category_binary) %>% 
+  summarize(count = sum(count)) %>% 
+  group_by(roadway_type, count_hr, time_of_day, speed_category_binary) %>% 
+  summarize(count = sum(count)) %>% 
+  mutate(percent = count / sum(count)) %>% 
+  ungroup() %>% 
+  filter(speed_category_binary != "Not speeding") %>%
+  ggplot(aes(x = count_hr, y = percent, fill = time_of_day)) +
+  geom_col() +
+  scale_y_continuous(labels = label_percent()) +
+  scale_fill_manual(values = c("darkred", "darkblue")) +
+  facet_wrap(~roadway_type) +
+  labs(title = "Speeding traffic by time of day",
+       x = "Hour",
+       y = "Percent speeding",
+       fill = "Time of day",
+       caption = "Source: DVRPC speed measurement data") +
+  theme(legend.position = "bottom")
+
+```
+
+#### Detailed
+
+```{r}
+
+speed_data_analysis %>% 
+  group_by(recordnum, countdate, count_hr, roadway_type, speed_category_detailed) %>% 
+  summarize(count = sum(count)) %>% 
+  group_by(roadway_type, count_hr, speed_category_detailed) %>% 
+  summarize(count = sum(count)) %>% 
+  mutate(percent = count / sum(count)) %>% 
+  ungroup() %>% 
+  filter(speed_category_detailed != "Not speeding") %>%
+  ggplot(aes(x = count_hr, y = percent, fill = speed_category_detailed)) +
+  geom_col(position = position_stack()) +
+  scale_y_continuous(labels = label_percent()) +
+  facet_wrap(~roadway_type) +
+  # scale_fill_manual(values = c("darkred", "darkblue")) +
+  labs(title = "Speeding traffic by time of day",
+       x = "Hour",
+       y = "Percent speeding",
+       fill = "Speeding category",
+       caption = "Source: DVRPC speed measurement data") +
+  theme(legend.position = "right")
+
+```
+
+### Off-peak speed corridors
+
+Where are the roadways where the prevalence of speeding at off-peak hours is the highest?
+
+#### Any speeding
+
+The table below shows roadway type distribution for segments where more than half of traffic speeds in off-peak hours.
+
+```{r}
+
+off_peak_any_speeding <- speed_data_analysis %>% 
+  filter(time_of_day == "Off-peak") %>% 
+  group_by(recordnum, roadway_type, speed_category_binary) %>% 
+  summarize(count = sum(count)) %>% 
+  mutate(percent = count / sum(count)) %>% 
+  ungroup() %>% 
+  filter(speed_category_binary != "Not speeding") 
+
+off_peak_any_speeding_top <- off_peak_any_speeding %>% 
+  # filter: removed 419 rows (73%), 158 rows remaining
+  filter(percent > 0.5)
+
+off_peak_any_speeding_top %>% 
+  tabyl(roadway_type) %>% 
+  gt_print()
+
+```
+
+Major arterials and high speed ramps are disproportionately prone to speeding drivers in off-peak hours.
+
+The map below shows the location of these majority-speeding roadways; thickness is proportional to % of speeding traffic.
+
+```{r}
+
+off_peak_any_speeding_top_map <- off_peak_any_speeding_top %>% 
+  left_join(speed_data_centerlines_segments %>% 
+              select(recordnum)) %>%
+  st_as_sf(crs = "EPSG:2272")
+
+mapview(off_peak_any_speeding_high_map, zcol = "roadway_type", lwd = "percent")
+
+```
+
+#### High speeding
+
+The table below shows roadway type distribution for segments where more than 10% of traffic speeds 11mph or more over the limit in off-peak hours.
+
+```{r}
+
+off_peak_high_speeding <- speed_data_analysis %>% 
+  filter(time_of_day == "Off-peak") %>% 
+  group_by(recordnum, roadway_type, speed_category_detailed) %>% 
+  summarize(count = sum(count)) %>% 
+  mutate(percent = count / sum(count)) %>% 
+  ungroup() %>% 
+  filter(!speed_category_detailed %in% c("Not speeding", "1-10mph over speed limit")) %>% 
+  group_by(recordnum, roadway_type) %>% 
+  summarize(count = sum(count), percent = sum(percent)) %>% 
+  ungroup()
+
+off_peak_high_speeding_top <- off_peak_high_speeding %>% 
+  # filter: removed 482 rows (84%), 95 rows remaining
+  filter(percent > 0.1)
+
+off_peak_high_speeding_top %>% 
+  tabyl(roadway_type) %>% 
+  gt_print()
+
+```
+
+Major arterials and high speed ramps are even more disproportionately prone to high-speeding drivers in off-peak hours.
+
+The map below shows the location of these high-speeding roadways; thickness is proportional to % of speeding traffic.
+
+```{r}
+
+off_peak_high_speeding_top_map <- off_peak_high_speeding_top %>% 
+  left_join(speed_data_centerlines_segments %>% 
+              select(recordnum)) %>%
+  st_as_sf(crs = "EPSG:2272")
+
+mapview(off_peak_high_speeding_top_map, zcol = "roadway_type", lwd = "percent")
+
+```
+
+## Relationship between volume and speeding
+
+Are drivers more likely to speed for a given roadway type if overall volume is lower?
+
+```{r}
+
+off_peak_volume <- speed_data_analysis %>% 
+  filter(time_of_day == "Off-peak") %>% 
+  group_by(recordnum, roadway_type) %>% 
+  summarize(volume_total = sum(volume_total)) %>% 
+  ungroup()
+
+```
+
+### Any speeding
+
+There doesn't seem to be any definitive pattern.
+
+```{r}
+
+off_peak_any_speeding_volume <- off_peak_any_speeding %>% 
+  left_join(off_peak_volume)
+
+off_peak_any_speeding_volume %>% 
+  ggplot(aes(x = volume_total, y = percent)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~roadway_type) +
+  coord_cartesian(ylim = c(0, 1))
+
+```
+
+### High speeding
+
+There doesn't seem to be any definitive pattern.
+
+```{r}
+
+off_peak_high_speeding_volume <- off_peak_high_speeding %>% 
+  left_join(off_peak_volume)
+
+off_peak_high_speeding_volume %>% 
+  ggplot(aes(x = volume_total, y = percent)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~roadway_type) +
+  coord_cartesian(ylim = c(0, 1))
+
+```
 
 
