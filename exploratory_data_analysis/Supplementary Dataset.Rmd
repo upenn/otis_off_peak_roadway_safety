@@ -1,0 +1,276 @@
+---
+title: "EDA"
+output: html_document
+date: "2026-02-10"
+---
+
+```{r setup, include=FALSE}
+# --- 0. 环境配置与 Box 认证 ---
+library(tidyverse)
+library(tidygeocoder)
+library(sf)
+library(mapview) 
+library(janitor) 
+library(boxr)
+
+# 每次打开 R session 只需要验证一次。
+# 请确保你已经按照教程配置好了 .Renviron 里的 BOX_CLIENT_ID 和 SECRET
+box_auth()
+
+# --- 定义一个专门读取 Box 空间数据的超级函数 ---
+# 因为 boxr 默认的 box_read 不太擅长直接把空间数据转成 sf 对象
+# 这个函数会把它下载到临时文件夹再读取，干净且不会弄乱你的本地文件
+
+# --- 最终极简版：读取 Box 空间数据函数 ---
+read_box_sf <- function(file_id, crs = 2272) {
+  # 1. 获取临时文件夹路径
+  temp_dir <- tempdir()
+  
+  # 2. box_dl 会下载文件，并直接返回该文件在电脑上的完整存放路径
+  dl_file_path <- box_dl(file_id, local_dir = temp_dir, overwrite = TRUE)
+  
+  # 3. 直接拿这个路径给 st_read 读取，并转换坐标系
+  sf_data <- st_read(dl_file_path) %>% st_transform(crs)
+  
+  return(sf_data)
+}
+```
+
+```{r}
+# --- 1. 读取已经修复好的红灯摄像头数据 ---
+# 注意：你不再需要跑 geocode 那一大段代码了！直接读取你存在 Box 里的成品。
+
+# 【操作提示】：去 Box 网页版，点开 362958210990 文件夹里的 red_light_cameras_fixed.geojson
+# 把浏览器网址里 [https://upenn.app.box.com/file/](https://upenn.app.box.com/file/) 后面的那串数字替换掉下面的 "你的_FIXED_CAMERA_FILE_ID"
+fixed_camera_file_id <- 2144281173122 # ⬅️ 填入真实的文件 ID
+
+red_light_sf <- read_box_sf(fixed_camera_file_id)
+
+# 检查一下是不是有 108 个点（包含打散效果）
+mapview(red_light_sf, col.regions = "red", layer.name = "108 Red Light Cams (Separated)")
+```
+```{r}
+# 4. 转换、扰动并保存
+red_light_sf <- red_light_geocoded %>%
+  filter(!is.na(lat), !is.na(long)) %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326) %>% 
+  st_transform(2272) %>% # 投影到费城局部坐标系 (单位: 英尺)
+  st_jitter(amount = 40) # 关键魔法：把重合的点在 40 英尺范围内随机打散！
+
+# 5. 地图确认
+library(mapview)
+mapview(red_light_sf, 
+        zcol = "site_location", # 点击点的时候，可以看到具体的 site_location 方向
+        layer.name = "108 Red Light Cams (Separated)")
+```
+
+```{r}
+# --- 2. 从主数据文件夹读取其他 GeoJSON ---
+# 文件夹: [https://upenn.app.box.com/folder/362958311858](https://upenn.app.box.com/folder/362958311858)
+# 【操作提示】：请去 Box 里找到这四个文件，分别把它们的 File ID 填在下面
+
+id_traffic    <- 2123213862368 # 替换为 traffic_calming_devices.geojson 的 File ID
+id_intersect  <- 2123208654111 # 替换为 intersection_controls.geojson 的 File ID
+id_lights     <- 2129860050884 # 替换为 Street_Poles.geojson 的 File ID
+id_bus        <- 2130613247190 # 替换为 Transit_Stops_(Spring_2025).geojson 的 File ID
+
+philly_crs <- 2272
+
+# 使用我们前面定义的专属函数，一键读取 + 转换坐标系
+traffic_calming <- read_box_sf(id_traffic, crs = philly_crs)
+intersections   <- read_box_sf(id_intersect, crs = philly_crs)
+streetlights    <- read_box_sf(id_lights, crs = philly_crs)
+bus_stops       <- read_box_sf(id_bus, crs = philly_crs)
+
+# 如果你还有纯表格数据 (CSV)，用这个原生函数读取：
+# traffic_volumes <- box_read_csv(CSV_FILE_ID)
+```
+```{r}
+# --- 1. Traffic Calming EDA ---
+
+# 1. 检查数据包含哪些列 (寻找表示设备类型的列，比如 'type' 或 'device_type')
+names(traffic_calming)
+
+# 2. 空间剪裁：只保留费城市内的设施，滤除异常点
+traffic_calming_phl <- traffic_calming %>% 
+  st_filter(philly_boundary)
+
+print(paste("过滤后费城市内交通静化设施总数:", nrow(traffic_calming_phl)))
+
+# 3. 绘制交通静化设施分布图 (空间点图)
+ggplot() + 
+  # 第一层：费城边界底图 (复用之前的 philly_boundary)
+  geom_sf(data = philly_boundary, fill = "grey95", color = "darkgrey", size = 0.5) +
+  
+  # 第二层：交通静化设施 (使用醒目的亮橙色 darkorange)
+  geom_sf(data = traffic_calming_phl, color = "darkorange", size = 0.8, alpha = 0.7) +
+  
+  # 锁定坐标系投影 (2272)
+  coord_sf(crs = st_crs(2272), datum = NA) +
+  
+  # 完善标题和主题
+  ggtitle("Traffic Calming Devices in Philadelphia") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", margin = margin(b = 10)))
+
+
+# --- (可选) 附加的柱状图 EDA：统计各种设施的数量 ---
+# 如果你想看看哪种设施最多（比如 Speed Cushion 减速带），可以运行下面这段代码：
+# ⚠️ 注意：请把代码里的 "type" 替换成你在 names(traffic_calming) 中看到的真实表示类型的列名！
+
+# traffic_calming_phl %>% 
+#   st_drop_geometry() %>% 
+#   count(type, sort = TRUE) %>% 
+#   ggplot(aes(x = reorder(type, n), y = n)) +
+#   geom_col(fill = "darkorange") +
+#   coord_flip() +  # 横向柱状图更好阅读长名字
+#   theme_minimal() +
+#   labs(title = "Traffic Calming Devices by Type", 
+#        x = "Device Type", 
+#        y = "Count") +
+#   theme(plot.title = element_text(face = "bold"))
+```
+```{r}
+# 2. Intersections EDA
+names(intersections)
+
+intersections %>% 
+  st_drop_geometry() %>%
+  count(stoptype, sort = TRUE) # 如果报错，请检查实际列名是不是叫 stoptype
+
+# 检查缺失值
+sum(is.na(intersections$stoptype))
+```
+```{r}
+# 3. Streetlight EDA
+ggplot() +
+  stat_density2d(data = data.frame(st_coordinates(streetlights)), 
+                 aes(X, Y, fill = ..level.., alpha = ..level..), 
+                 geom = "polygon") +
+  scale_fill_viridis_c() +
+  theme_void() +
+  ggtitle("Density of Streetlights (Street Poles)")
+
+print(paste("Total Street Lights:", nrow(streetlights)))
+```
+
+```{r}
+library(tigris) 
+library(scales) 
+
+# --- 1. 获取费城边界 (如果前面跑过了，这里会直接使用缓存) ---
+options(tigris_use_cache = TRUE) 
+philly_boundary <- counties(state = "PA", cb = TRUE) %>%
+  filter(NAME == "Philadelphia") %>%
+  st_transform(2272)
+
+# --- 2. 提取坐标 ---
+st_coords <- data.frame(st_coordinates(streetlights))
+
+# --- 3. 绘制修复图例的密度图 ---
+ggplot() +
+  # 第一层：底图
+  geom_sf(data = philly_boundary, fill = "grey95", color = "darkgrey", size = 0.5) +
+  
+  # 第二层：关键修复！使用 level / max(level) 计算相对密度，完美解决报错
+  stat_density_2d(data = st_coords, 
+                  aes(x = X, y = Y, 
+                      fill = after_stat(level / max(level)), 
+                      alpha = after_stat(level / max(level))), 
+                  geom = "polygon", 
+                  bins = 15) + 
+  
+  # 第三层：图例与颜色
+  scale_fill_viridis_c(labels = percent, name = "Relative\nDensity") +
+  scale_alpha_continuous(guide = "none") + 
+  
+  # 第四层：投影与主题
+  coord_sf(crs = st_crs(2272), datum = NA) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", margin = margin(b = 10))) +
+  ggtitle("Density of Streetlights in Philadelphia")
+
+# 打印结果
+print(paste("Total Street Lights:", nrow(streetlights)))
+```
+
+
+```{r}
+# 4. Septa Stops EDA
+names(bus_stops)
+
+ggplot() + 
+  geom_sf(data = bus_stops, size = 0.1, alpha = 0.5) +
+  ggtitle("SEPTA Transit Stop Locations (Spring 2025)") +
+  theme_void()
+```
+```{r}
+# 4. Septa Stops EDA
+# 查看列名 (寻找有没有区分路线类型的列，比如 LineAbbr)
+names(bus_stops)
+
+# --- 新增步骤：用费城边界剪裁公交站点 ---
+# 只保留与 philly_boundary 有空间相交（在内部）的站点
+bus_stops_phl <- bus_stops %>% 
+  st_filter(philly_boundary)
+
+# 打印一下剪裁前后的数据量对比，方便写 EDA 报告
+print(paste("剪裁前 (大费城地区) 站点总数:", nrow(bus_stops)))
+print(paste("剪裁后 (费城市内) 站点总数:", nrow(bus_stops_phl)))
+
+
+# --- 绘图 ---
+ggplot() + 
+  # 第一层：费城边界底图 (复用上一节生成的 philly_boundary)
+  geom_sf(data = philly_boundary, fill = "grey95", color = "darkgrey", size = 0.5) +
+  
+  # 第二层：使用剪裁后的 SEPTA 站点数据 (bus_stops_phl)
+  geom_sf(data = bus_stops_phl, size = 0.1, alpha = 0.5, color = "navy") +
+  
+  # 锁定坐标系投影 (2272)，完美解决“投影很歪”的问题，并去掉背景网格线
+  coord_sf(crs = st_crs(2272), datum = NA) +
+  
+  # 完善标题和主题排版 (标题稍微改了一下，注明是费城市内)
+  ggtitle("SEPTA Transit Stop Locations in Philadelphia (Spring 2025)") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", margin = margin(b = 10)))
+```
+```{r}
+# --- 4. Septa Stops EDA (剪裁与密度分析 - 最终修复版) ---
+
+# 1. 空间剪裁 (Spatial Filtering)
+bus_stops_phl <- bus_stops %>%
+  st_filter(philly_boundary)
+
+print(paste("剪裁前 (大费城地区) 站点总数:", nrow(bus_stops)))
+print(paste("剪裁后 (费城市内) 站点总数:", nrow(bus_stops_phl)))
+
+# 2. 提取坐标
+bus_coords <- data.frame(st_coordinates(bus_stops_phl))
+
+# 3. 绘制费城内站点的核密度图 (Kernel Density Map)
+ggplot() + 
+  # 第一层：费城边界底图
+  geom_sf(data = philly_boundary, fill = "grey95", color = "darkgrey", size = 0.5) +
+  
+  # 第二层：SEPTA 站点热力图 (使用 level / max(level) 解决极小值和报错问题)
+  stat_density_2d(data = bus_coords, 
+                  aes(x = X, y = Y, 
+                      fill = after_stat(level / max(level)), 
+                      alpha = after_stat(level / max(level))), 
+                  geom = "polygon", 
+                  bins = 15) + 
+  
+  # 设置图例和颜色 (plasma 色系)
+  scale_fill_viridis_c(option = "plasma", labels = percent, name = "Relative\nDensity") +
+  scale_alpha_continuous(guide = "none") + 
+  
+  # 锁定投影系
+  coord_sf(crs = st_crs(2272), datum = NA) +
+  
+  # 完善标题和主题
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", margin = margin(b = 10))) +
+  ggtitle("Density of SEPTA Transit Stops in Philadelphia")
+```
+
