@@ -599,16 +599,7 @@ nearest_line_indices <- st_nearest_feature(speed_data_coords, centerlines_ready)
 # Geometry: measurement points
 speed_data_centerlines <- speed_data_coords %>% 
   mutate(centerlines_index = centerlines_ready$centerlines_index[nearest_line_indices]) %>% 
-  left_join(centerlines_ready %>% st_drop_geometry()) %>% 
-  mutate(roadway_type =
-           fct_relevel(roadway_type,
-                       "Major Arterial",
-                       "Minor Arterial",
-                       "Collector",
-                       "Local",
-                       "High Speed Ramps",
-                       "Low Speed Ramps",
-                       "Expressways"))
+  left_join(centerlines_ready %>% st_drop_geometry())
 
 # Geometry: segments where measurements were made
 speed_data_centerlines_segments <- speed_data_centerlines %>%
@@ -630,7 +621,16 @@ speed_data_analysis <- speed_data_long %>%
                      count_hr >= 16 ~ "Peak",
                      count_hr >= 11 ~ "Off-peak",
                      count_hr >= 7 ~ "Peak",
-                     count_hr >= 0 ~ "Off-peak"))
+                     count_hr >= 0 ~ "Off-peak")) %>% 
+  # Exclude highway-related measurement points
+  # filter: removed 16,464 rows (2%), 760,368 rows remaining
+  filter(!roadway_type %in% c("High Speed Ramps", "Low Speed Ramps", "Expressways")) %>% 
+  mutate(roadway_type =
+           fct_relevel(roadway_type,
+                       "Major Arterial",
+                       "Minor Arterial",
+                       "Collector",
+                       "Local"))
 
 ```
 
@@ -642,6 +642,33 @@ Joining the 2022-2025 speed measurement data spatially to Philadelphia street ce
 
 mapview(speed_data_centerlines, cex = 3) +
   mapview(speed_data_centerlines_segments, zcol = "roadway_type")
+
+```
+
+There are a few measurement points at highways and highway ramps. We exclude them for all analyses below.
+
+```{r Mapping palette}
+
+roadway_colors <- c("#ff9500", "#ffd000", "#00badb", "#156082")
+
+```
+
+```{r}
+
+mapviewOptions(legend.pos = "bottomright")
+
+mapview(speed_data_centerlines_segments %>% 
+          filter(!roadway_type %in% c("High Speed Ramps", "Low Speed Ramps", "Expressways")) %>% 
+          mutate(roadway_type =
+                   fct_relevel(roadway_type,
+                               "Major Arterial",
+                               "Minor Arterial",
+                               "Collector",
+                               "Local")), 
+        zcol = "roadway_type",
+        color = roadway_colors,
+        lwd = 4,
+        layer.name = "Roadway type")
 
 ```
 
@@ -698,15 +725,21 @@ speed_data_analysis %>%
   ungroup() %>% 
   filter(speed_category_detailed != "Not speeding") %>%
   ggplot(aes(x = count_hr, y = percent, fill = speed_category_detailed)) +
+  annotate("rect", xmin = 0, xmax = 6, ymin = 0, ymax = 1, alpha = .2) +
+  annotate("rect", xmin = 11, xmax = 15, ymin = 0, ymax = 1, alpha = .2) +
+  annotate("rect", xmin = 20, xmax = 24, ymin = 0, ymax = 1, alpha = .2) +
   geom_col(position = position_stack()) +
   scale_y_continuous(labels = label_percent()) +
-  # scale_fill_manual(values = c("darkred", "darkblue")) +
+  scale_fill_manual(values = roadway_colors) +
   labs(title = "Speeding traffic by time of day",
+       subtitle = "Shaded areas indicate off-peak times",
        x = "Hour",
        y = "Percent speeding",
        fill = "Speeding category",
        caption = "Source: DVRPC speed measurement data") +
   theme(legend.position = "right")
+
+# ggsave("speeding_time_of_day.png", width = 8, height = 5)
 
 ```
 
@@ -751,16 +784,22 @@ speed_data_analysis %>%
   ungroup() %>% 
   filter(speed_category_detailed != "Not speeding") %>%
   ggplot(aes(x = count_hr, y = percent, fill = speed_category_detailed)) +
+  annotate("rect", xmin = 0, xmax = 6, ymin = 0, ymax = 1, alpha = .2) +
+  annotate("rect", xmin = 11, xmax = 15, ymin = 0, ymax = 1, alpha = .2) +
+  annotate("rect", xmin = 20, xmax = 24, ymin = 0, ymax = 1, alpha = .2) +
   geom_col(position = position_stack()) +
   scale_y_continuous(labels = label_percent()) +
   facet_wrap(~roadway_type) +
-  # scale_fill_manual(values = c("darkred", "darkblue")) +
+  scale_fill_manual(values = roadway_colors) +
   labs(title = "Speeding traffic by time of day",
+       subtitle = "Shaded areas indicate off-peak times",
        x = "Hour",
        y = "Percent speeding",
        fill = "Speeding category",
        caption = "Source: DVRPC speed measurement data") +
   theme(legend.position = "right")
+
+# ggsave("speeding_time_of_day_roadway_type.png", width = 8, height = 5)
 
 ```
 
@@ -780,15 +819,25 @@ off_peak_any_speeding <- speed_data_analysis %>%
   summarize(count = sum(count)) %>% 
   mutate(percent = count / sum(count)) %>% 
   ungroup() %>% 
-  filter(speed_category_binary != "Not speeding") 
+  filter(speed_category_binary != "Not speeding") %>% 
+  mutate(majority_speeding = if_else(percent > 0.5, TRUE, FALSE))
 
-off_peak_any_speeding_top <- off_peak_any_speeding %>% 
-  # filter: removed 419 rows (73%), 158 rows remaining
-  filter(percent > 0.5)
-
-off_peak_any_speeding_top %>% 
+off_peak_any_speeding %>% 
+  # filter: removed 409 rows (75%), 139 rows remaining
+  filter(majority_speeding == TRUE) %>% 
   tabyl(roadway_type) %>% 
-  gt_print()
+  gt_print() %>% 
+  tab_header("Distribution of roadway types with more than half of traffic speeding in off-peak hours")
+
+off_peak_any_speeding %>% 
+  group_by(roadway_type, majority_speeding) %>% 
+  summarize(n = n()) %>% 
+  mutate(percent = n / sum(n)) %>% 
+  ungroup() %>% 
+  filter(majority_speeding == TRUE) %>% 
+  select(roadway_type, percent) %>% 
+  gt_print() %>% 
+  tab_header("Percentage of measurement points with more than half of traffic speeding in off-peak hours, by roadway type")
 
 ```
 
@@ -798,12 +847,17 @@ The map below shows the location of these majority-speeding roadways.
 
 ```{r}
 
-off_peak_any_speeding_top_map <- off_peak_any_speeding_top %>% 
+off_peak_any_speeding_top_map <- off_peak_any_speeding %>% 
+  filter(majority_speeding == TRUE) %>% 
   left_join(speed_data_centerlines_segments %>% 
               select(recordnum)) %>%
   st_as_sf(crs = "EPSG:2272")
 
-mapview(off_peak_any_speeding_top_map, zcol = "roadway_type")
+mapview(off_peak_any_speeding_top_map, 
+        zcol = "roadway_type",
+        color = roadway_colors,
+        # lwd = "percent",
+        layer.name = "Roadway type")
 
 ```
 
@@ -822,15 +876,25 @@ off_peak_high_speeding <- speed_data_analysis %>%
   filter(!speed_category_detailed %in% c("Not speeding", "1-10mph over speed limit")) %>% 
   group_by(recordnum, roadway_type) %>% 
   summarize(count = sum(count), percent = sum(percent)) %>% 
-  ungroup()
+  ungroup() %>% 
+  mutate(frequent_speeding = if_else(percent > 0.1, TRUE, FALSE))
 
-off_peak_high_speeding_top <- off_peak_high_speeding %>% 
-  # filter: removed 482 rows (84%), 95 rows remaining
-  filter(percent > 0.1)
-
-off_peak_high_speeding_top %>% 
+off_peak_high_speeding %>% 
+  # filter: removed 468 rows (85%), 80 rows remaining
+  filter(frequent_speeding == TRUE) %>% 
   tabyl(roadway_type) %>% 
-  gt_print()
+  gt_print() %>% 
+  tab_header("Distribution of roadway types with more than 10% of traffic speeding by more than 11mph in off-peak hours")
+
+off_peak_high_speeding %>% 
+  group_by(roadway_type, frequent_speeding) %>% 
+  summarize(n = n()) %>% 
+  mutate(percent = n / sum(n)) %>% 
+  ungroup() %>% 
+  filter(frequent_speeding == TRUE) %>% 
+  select(roadway_type, percent) %>% 
+  gt_print() %>% 
+  tab_header("Percentage of measurement points with more than 10% of traffic speeding by more than 11mph in off-peak hours, by roadway type")
 
 ```
 
@@ -840,12 +904,17 @@ The map below shows the location of these high-speeding roadways.
 
 ```{r}
 
-off_peak_high_speeding_top_map <- off_peak_high_speeding_top %>% 
+off_peak_high_speeding_top_map <- off_peak_high_speeding %>% 
+  filter(frequent_speeding == TRUE) %>% 
   left_join(speed_data_centerlines_segments %>% 
               select(recordnum)) %>%
   st_as_sf(crs = "EPSG:2272")
 
-mapview(off_peak_high_speeding_top_map, zcol = "roadway_type")
+mapview(off_peak_high_speeding_top_map, 
+        zcol = "roadway_type",
+        color = roadway_colors,
+        # lwd = "percent",
+        layer.name = "Roadway type")
 
 ```
 
